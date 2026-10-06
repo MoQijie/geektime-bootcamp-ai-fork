@@ -11,6 +11,7 @@ from openai import AsyncOpenAI
 
 from pg_mcp.config.settings import OpenAIConfig
 from pg_mcp.models.errors import LLMError, LLMTimeoutError, LLMUnavailableError
+from pg_mcp.observability.metrics import MetricsCollector
 from pg_mcp.prompts.sql_generation import SQL_GENERATION_SYSTEM_PROMPT, build_user_prompt
 
 if TYPE_CHECKING:
@@ -35,13 +36,15 @@ class SQLGenerator:
         ... )
     """
 
-    def __init__(self, config: OpenAIConfig) -> None:
+    def __init__(self, config: OpenAIConfig, metrics: MetricsCollector | None = None) -> None:
         """Initialize SQL generator with OpenAI configuration.
 
         Args:
             config: OpenAI configuration including API key and model settings.
         """
         self.config = config
+        self.metrics = metrics
+        self.last_tokens_used = 0
         self.client = AsyncOpenAI(api_key=config.api_key.get_secret_value(), timeout=config.timeout)
 
     async def generate(
@@ -96,6 +99,13 @@ class SQLGenerator:
         )
 
         try:
+            start_time = None
+            if self.metrics is not None:
+                import time
+
+                start_time = time.perf_counter()
+                self.metrics.increment_llm_call("generate_sql")
+
             response: ChatCompletion = await self.client.chat.completions.create(
                 model=self.config.model,
                 messages=[
@@ -105,6 +115,10 @@ class SQLGenerator:
                 temperature=self.config.temperature,
                 max_tokens=self.config.max_tokens,
             )
+            if self.metrics is not None and start_time is not None:
+                import time
+
+                self.metrics.observe_llm_latency("generate_sql", time.perf_counter() - start_time)
         except TimeoutError as e:
             raise LLMTimeoutError(
                 message=f"OpenAI API request timed out after {self.config.timeout}s",
@@ -141,6 +155,12 @@ class SQLGenerator:
                 message="OpenAI returned empty message content",
                 details={"response": response.model_dump()},
             )
+
+        usage = getattr(response, "usage", None)
+        total_tokens = getattr(usage, "total_tokens", 0) or 0
+        self.last_tokens_used = total_tokens
+        if self.metrics is not None and total_tokens:
+            self.metrics.increment_llm_tokens("generate_sql", total_tokens)
 
         sql = self._extract_sql(content)
         if not sql:

@@ -12,6 +12,7 @@ from openai import AsyncOpenAI
 from pg_mcp.config.settings import OpenAIConfig, ValidationConfig
 from pg_mcp.models.errors import LLMError, LLMTimeoutError, LLMUnavailableError
 from pg_mcp.models.query import ResultValidationResult
+from pg_mcp.observability.metrics import MetricsCollector
 from pg_mcp.prompts.result_validation import (
     RESULT_VALIDATION_SYSTEM_PROMPT,
     build_validation_prompt,
@@ -44,6 +45,7 @@ class ResultValidator:
         self,
         openai_config: OpenAIConfig,
         validation_config: ValidationConfig,
+        metrics: MetricsCollector | None = None,
     ) -> None:
         """Initialize result validator with OpenAI and validation configuration.
 
@@ -53,6 +55,7 @@ class ResultValidator:
         """
         self.openai_config = openai_config
         self.validation_config = validation_config
+        self.metrics = metrics
         self.client = AsyncOpenAI(
             api_key=openai_config.api_key.get_secret_value(),
             timeout=validation_config.timeout_seconds,
@@ -117,6 +120,13 @@ class ResultValidator:
         )
 
         try:
+            start_time = None
+            if self.metrics is not None:
+                import time
+
+                start_time = time.perf_counter()
+                self.metrics.increment_llm_call("validate_result")
+
             # Call OpenAI API with structured JSON output
             response: ChatCompletion = await self.client.chat.completions.create(
                 model=self.openai_config.model,
@@ -128,6 +138,10 @@ class ResultValidator:
                 temperature=0.0,  # Use deterministic output for validation
                 response_format={"type": "json_object"},  # Ensure JSON response
             )
+            if self.metrics is not None and start_time is not None:
+                import time
+
+                self.metrics.observe_llm_latency("validate_result", time.perf_counter() - start_time)
 
             # Extract and parse the response
             if not response.choices:
@@ -142,6 +156,11 @@ class ResultValidator:
                     message="OpenAI returned empty message content for result validation",
                     details={"response": response.model_dump()},
                 )
+
+            usage = getattr(response, "usage", None)
+            total_tokens = getattr(usage, "total_tokens", 0) or 0
+            if self.metrics is not None and total_tokens:
+                self.metrics.increment_llm_tokens("validate_result", total_tokens)
 
             # Parse JSON response
             try:

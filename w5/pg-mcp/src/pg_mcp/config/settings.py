@@ -88,6 +88,15 @@ class SecurityConfig(BaseSettings):
         ],
         description="List of blocked PostgreSQL functions",
     )
+    blocked_tables: list[str] = Field(
+        default_factory=list,
+        description="List of blocked tables or schema-qualified tables",
+    )
+    blocked_columns: list[str] = Field(
+        default_factory=list,
+        description="List of blocked columns or table-qualified columns",
+    )
+    allow_explain: bool = Field(default=False, description="Allow EXPLAIN statements")
     max_rows: int = Field(default=10000, ge=1, le=100000, description="Maximum rows to return")
     max_execution_time: float = Field(
         default=30.0, ge=1.0, le=300.0, description="Maximum query execution time in seconds"
@@ -105,6 +114,14 @@ class SecurityConfig(BaseSettings):
         """Parse comma-separated string or list."""
         if isinstance(v, str):
             return [f.strip() for f in v.split(",") if f.strip()]
+        return v
+
+    @field_validator("blocked_tables", "blocked_columns", mode="before")
+    @classmethod
+    def parse_string_list(cls, v: str | list[str]) -> list[str]:
+        """Parse comma-separated string or list for access control entries."""
+        if isinstance(v, str):
+            return [item.strip() for item in v.split(",") if item.strip()]
         return v
 
 
@@ -163,6 +180,15 @@ class ResilienceConfig(BaseSettings):
     circuit_breaker_timeout: float = Field(
         default=60.0, ge=10.0, le=300.0, description="Circuit breaker timeout in seconds"
     )
+    max_concurrent_queries: int = Field(
+        default=10, ge=1, le=1000, description="Maximum concurrent query requests"
+    )
+    max_concurrent_llm_calls: int = Field(
+        default=5, ge=1, le=1000, description="Maximum concurrent LLM calls"
+    )
+    rate_limit_timeout: float = Field(
+        default=5.0, ge=0.1, le=60.0, description="Timeout waiting for rate limiter slots"
+    )
 
 
 class ObservabilityConfig(BaseSettings):
@@ -177,7 +203,7 @@ class ObservabilityConfig(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
         default="INFO", description="Logging level"
     )
-    log_format: Literal["json", "text"] = Field(default="text", description="Log format")
+    log_format: Literal["json", "text"] = Field(default="json", description="Log format")
 
 
 class Settings(BaseSettings):
@@ -196,6 +222,10 @@ class Settings(BaseSettings):
 
     # Nested configurations
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
+    databases: list[DatabaseConfig] = Field(
+        default_factory=list,
+        description="Optional multi-database configuration. Falls back to 'database' when empty.",
+    )
     openai: OpenAIConfig = Field(default_factory=OpenAIConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     validation: ValidationConfig = Field(default_factory=ValidationConfig)
@@ -212,6 +242,20 @@ class Settings(BaseSettings):
     def is_development(self) -> bool:
         """Check if running in development environment."""
         return self.environment == "development"
+
+    @field_validator("databases")
+    @classmethod
+    def validate_databases(cls, databases: list[DatabaseConfig]) -> list[DatabaseConfig]:
+        """Ensure configured database names are unique."""
+        names = [db.name for db in databases]
+        if len(names) != len(set(names)):
+            raise ValueError("Database names must be unique")
+        return databases
+
+    @property
+    def configured_databases(self) -> list[DatabaseConfig]:
+        """Return active database list with single-database backward compatibility."""
+        return self.databases or [self.database]
 
 
 # Global settings instance

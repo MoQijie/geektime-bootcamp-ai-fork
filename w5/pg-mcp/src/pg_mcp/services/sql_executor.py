@@ -15,6 +15,7 @@ from asyncpg import Connection, Pool
 
 from pg_mcp.config.settings import DatabaseConfig, SecurityConfig
 from pg_mcp.models.errors import DatabaseError, ExecutionTimeoutError
+from pg_mcp.observability.metrics import MetricsCollector
 
 
 class SQLExecutor:
@@ -37,6 +38,7 @@ class SQLExecutor:
         pool: Pool,
         security_config: SecurityConfig,
         db_config: DatabaseConfig,
+        metrics: MetricsCollector | None = None,
     ) -> None:
         """Initialize SQL executor.
 
@@ -48,6 +50,7 @@ class SQLExecutor:
         self.pool = pool
         self.security_config = security_config
         self.db_config = db_config
+        self.metrics = metrics
 
     async def execute(
         self,
@@ -92,6 +95,7 @@ class SQLExecutor:
         max_rows = max_rows or self.security_config.max_rows
 
         try:
+            execution_start = asyncio.get_running_loop().time()
             async with (
                 self.pool.acquire() as connection,
                 connection.transaction(readonly=True),
@@ -126,6 +130,11 @@ class SQLExecutor:
 
                 # Serialize special PostgreSQL types
                 results = self._serialize_results(results)
+
+                if self.metrics is not None:
+                    self.metrics.observe_db_query_duration(
+                        asyncio.get_running_loop().time() - execution_start
+                    )
 
                 return results, total_count
 
